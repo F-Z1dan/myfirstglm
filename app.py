@@ -8,7 +8,7 @@ import pandas as pd
 
 # ===================== 页面设置 =====================
 st.set_page_config(page_title="AI Chatbot", page_icon="🤖")
-st.title("🤖 AI Chatbot")
+st.title("🤖 张梓源的AI Chatbot")
 
 # ===================== 初始化 session state =====================
 if "messages" not in st.session_state:
