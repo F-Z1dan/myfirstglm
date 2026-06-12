@@ -4,10 +4,43 @@ from openai import APIError, APIConnectionError, AuthenticationError
 from tavily import TavilyClient
 from PyPDF2 import PdfReader
 import pandas as pd
+import httpx
+import json
+from urllib.parse import quote as url_quote
 
 
 # ===================== 页面设置 =====================
 st.set_page_config(page_title="AI Chatbot", page_icon="🤖")
+
+# ---- 自定义样式 ----
+st.markdown("""
+<style>
+    /* 全局字体与背景 */
+    html, body, [class*="css"] {
+        font-family: "Inter", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    /* 主标题 */
+    h1 { color: #1a73e8; font-weight: 700; }
+    /* 侧边栏 */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #f8f9fa 0%, #e8eaed 100%);
+    }
+    /* 按钮 */
+    .stButton > button {
+        border-radius: 8px; border: none;
+        background: #1a73e8; color: white; font-weight: 600;
+        transition: all 0.2s;
+    }
+    .stButton > button:hover { background: #1557b0; transform: scale(1.02); }
+    /* 输入框 */
+    input, textarea { border-radius: 8px !important; }
+    /* 聊天气泡 */
+    [data-testid="stChatMessage"] {
+        border-radius: 12px; padding: 12px 16px; margin: 6px 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("🤖 张梓源的AI Chatbot")
 
 # ===================== 初始化 session state =====================
@@ -48,12 +81,51 @@ with st.sidebar:
 
     enable_search = st.checkbox("启用联网搜索", value=False)
 
-    tavily_api_key = st.text_input(
-        "Tavily API Key",
-        type="password",
-        placeholder="tvly-xxxxxxxxxxxxxxxx",
-        help="在 https://tavily.com 免费注册获取",
+    search_provider = st.selectbox(
+        "搜索服务",
+        options=["Tavily", "自定义 API"],
+        help="Tavily 是推荐选项，免费注册即用。也可自定义对接任意搜索 API",
     )
+
+    search_api_key = st.text_input(
+        f"{search_provider} API Key" if search_provider == "Tavily" else "搜索 API Key",
+        type="password",
+        placeholder="tvly-xxx 或你的 Key",
+    )
+
+    # 自定义 API 的额外配置
+    if search_provider == "自定义 API":
+        search_url = st.text_input(
+            "搜索接口 URL",
+            value="https://api.example.com/search",
+            help="GET 请求地址，用 {query} 代替搜索词，如 https://api.example.com/search?q={query}",
+        )
+        search_key_header = st.text_input(
+            "API Key 的 Header 名称",
+            value="X-API-Key",
+            help="HTTP Header 中传递 Key 的字段名",
+        )
+        search_results_path = st.text_input(
+            "结果 JSON 路径",
+            value="results",
+            help="响应 JSON 中结果数组的路径，如 results 或 data.items",
+        )
+        search_title_field = st.text_input(
+            "标题字段名",
+            value="title",
+        )
+        search_content_field = st.text_input(
+            "内容字段名",
+            value="content",
+        )
+        search_url_field = st.text_input(
+            "链接字段名",
+            value="url",
+        )
+    else:
+        # Tavily 模式不需要自定义字段，给个默认值防止引用报错
+        search_url = search_key_header = search_results_path = ""
+        search_title_field = search_content_field = search_url_field = ""
 
     search_max_results = st.slider(
         "搜索结果数",
@@ -61,7 +133,6 @@ with st.sidebar:
         max_value=10,
         value=5,
         step=1,
-        help="每次搜索返回的结果数量",
     )
 
     st.divider()
@@ -190,9 +261,9 @@ if prompt := st.chat_input("输入你的问题…"):
             st.warning("⚠️ 请先在侧边栏填写 API Key")
         st.stop()
 
-    if enable_search and not tavily_api_key:
+    if enable_search and not search_api_key:
         with st.chat_message("assistant"):
-            st.warning("⚠️ 请填写 Tavily API Key，或关闭「启用联网搜索」")
+            st.warning(f"⚠️ 请在侧边栏填写 {search_provider} API Key，或关闭联网搜索")
         st.stop()
 
     # ---- 调用 API ----
@@ -202,21 +273,57 @@ if prompt := st.chat_input("输入你的问题…"):
             api_messages = []
 
             # ① 联网搜索（如果启用）
-            if enable_search and tavily_api_key:
+            if enable_search and search_api_key:
                 try:
                     with st.status("🔍 正在联网搜索…", expanded=False):
-                        tavily = TavilyClient(api_key=tavily_api_key)
-                        search_results = tavily.search(
-                            query=prompt,
-                            max_results=search_max_results,
-                            search_depth="basic",
-                        )
+                        if search_provider == "Tavily":
+                            tavily = TavilyClient(api_key=search_api_key)
+                            raw = tavily.search(
+                                query=prompt,
+                                max_results=search_max_results,
+                                search_depth="basic",
+                            )
+                            results = raw.get("results", [])
+                            parsed = [
+                                {"title": r.get("title", ""), "content": r.get("content", ""), "url": r.get("url", "")}
+                                for r in results
+                            ]
+                        else:
+                            # 自定义搜索 API
+                            url = search_url.replace("{query}", url_quote(prompt))
+                            headers = {search_key_header: search_api_key} if search_key_header else {}
+                            resp = httpx.get(url, headers=headers, timeout=15)
+                            resp.raise_for_status()
+                            data = resp.json()
 
+                            # 按路径取出结果数组
+                            results = data
+                            for key in search_results_path.split("."):
+                                if isinstance(results, dict):
+                                    results = results.get(key, [])
+                                elif isinstance(results, list) and key.isdigit():
+                                    results = results[int(key)]
+                                else:
+                                    results = []
+                                    break
+                            if not isinstance(results, list):
+                                results = []
+
+                            parsed = [
+                                {
+                                    "title": r.get(search_title_field, ""),
+                                    "content": r.get(search_content_field, ""),
+                                    "url": r.get(search_url_field, ""),
+                                }
+                                for r in results[:search_max_results]
+                            ]
+
+                        # 组装搜索上下文
                         search_context = (
                             "以下是与用户问题相关的最新网络搜索结果，"
                             "请基于这些信息回答问题。如果搜索结果不足以回答问题，请如实告知。\n\n"
                         )
-                        for i, r in enumerate(search_results.get("results", [])):
+                        for i, r in enumerate(parsed):
                             search_context += (
                                 f"【结果 {i+1}】{r['title']}\n"
                                 f"{r['content']}\n"
@@ -224,7 +331,7 @@ if prompt := st.chat_input("输入你的问题…"):
                             )
 
                         api_messages.append({"role": "system", "content": search_context})
-                        st.caption(f"✅ 已获取 {len(search_results.get('results', []))} 条搜索结果")
+                        st.caption(f"✅ 已获取 {len(parsed)} 条搜索结果（{search_provider}）")
 
                 except Exception as e:
                     st.warning(f"⚠️ 搜索失败（{e}），将直接回答")
