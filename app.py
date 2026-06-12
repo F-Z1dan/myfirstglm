@@ -1,12 +1,8 @@
 import streamlit as st
 from openai import OpenAI
 from openai import APIError, APIConnectionError, AuthenticationError
-from tavily import TavilyClient
 from PyPDF2 import PdfReader
 import pandas as pd
-import httpx
-import json
-from urllib.parse import quote as url_quote
 
 
 # ===================== 页面设置 =====================
@@ -76,67 +72,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ---------- 联网搜索 ----------
-    st.header("🌐 联网搜索")
-
-    enable_search = st.checkbox("启用联网搜索", value=False)
-
-    search_provider = st.selectbox(
-        "搜索服务",
-        options=["Tavily", "自定义 API"],
-        help="Tavily 是推荐选项，免费注册即用。也可自定义对接任意搜索 API",
-    )
-
-    search_api_key = st.text_input(
-        f"{search_provider} API Key" if search_provider == "Tavily" else "搜索 API Key",
-        type="password",
-        placeholder="tvly-xxx 或你的 Key",
-    )
-
-    # 自定义 API 的额外配置
-    if search_provider == "自定义 API":
-        search_url = st.text_input(
-            "搜索接口 URL",
-            value="https://api.example.com/search",
-            help="GET 请求地址，用 {query} 代替搜索词，如 https://api.example.com/search?q={query}",
-        )
-        search_key_header = st.text_input(
-            "API Key 的 Header 名称",
-            value="X-API-Key",
-            help="HTTP Header 中传递 Key 的字段名",
-        )
-        search_results_path = st.text_input(
-            "结果 JSON 路径",
-            value="results",
-            help="响应 JSON 中结果数组的路径，如 results 或 data.items",
-        )
-        search_title_field = st.text_input(
-            "标题字段名",
-            value="title",
-        )
-        search_content_field = st.text_input(
-            "内容字段名",
-            value="content",
-        )
-        search_url_field = st.text_input(
-            "链接字段名",
-            value="url",
-        )
-    else:
-        # Tavily 模式不需要自定义字段，给个默认值防止引用报错
-        search_url = search_key_header = search_results_path = ""
-        search_title_field = search_content_field = search_url_field = ""
-
-    search_max_results = st.slider(
-        "搜索结果数",
-        min_value=1,
-        max_value=10,
-        value=5,
-        step=1,
-    )
-
-    st.divider()
-
     # ---------- 模型参数 ----------
     st.header("🔧 模型参数")
 
@@ -164,7 +99,7 @@ with st.sidebar:
         max_value=2.0,
         value=0.7,
         step=0.1,
-        help="越低越确定，越高越随机。需要精确答案设低，创意写作设高",
+        help="越低越确定，越高越随机",
     )
 
     st.divider()
@@ -183,7 +118,6 @@ with st.sidebar:
 
             if file_type == "txt":
                 content = uploaded_file.read().decode("utf-8", errors="ignore")
-
             elif file_type == "pdf":
                 pdf_reader = PdfReader(uploaded_file)
                 content = ""
@@ -191,11 +125,9 @@ with st.sidebar:
                     text = page.extract_text()
                     if text:
                         content += text + "\n"
-
             elif file_type == "csv":
                 df = pd.read_csv(uploaded_file)
                 content = df.to_string(max_rows=200)
-
             else:
                 content = None
 
@@ -261,91 +193,16 @@ if prompt := st.chat_input("输入你的问题…"):
             st.warning("⚠️ 请先在侧边栏填写 API Key")
         st.stop()
 
-    if enable_search and not search_api_key:
-        with st.chat_message("assistant"):
-            st.warning(f"⚠️ 请在侧边栏填写 {search_provider} API Key，或关闭联网搜索")
-        st.stop()
-
     # ---- 调用 API ----
     with st.chat_message("assistant"):
         try:
-            # 构建消息列表
-            api_messages = []
-
-            # ① 联网搜索（如果启用）
-            if enable_search and search_api_key:
-                try:
-                    with st.status("🔍 正在联网搜索…", expanded=False):
-                        if search_provider == "Tavily":
-                            tavily = TavilyClient(api_key=search_api_key)
-                            raw = tavily.search(
-                                query=prompt,
-                                max_results=search_max_results,
-                                search_depth="basic",
-                            )
-                            results = raw.get("results", [])
-                            parsed = [
-                                {"title": r.get("title", ""), "content": r.get("content", ""), "url": r.get("url", "")}
-                                for r in results
-                            ]
-                        else:
-                            # 自定义搜索 API
-                            url = search_url.replace("{query}", url_quote(prompt))
-                            headers = {search_key_header: search_api_key} if search_key_header else {}
-                            resp = httpx.get(url, headers=headers, timeout=15)
-                            resp.raise_for_status()
-                            data = resp.json()
-
-                            # 按路径取出结果数组
-                            results = data
-                            for key in search_results_path.split("."):
-                                if isinstance(results, dict):
-                                    results = results.get(key, [])
-                                elif isinstance(results, list) and key.isdigit():
-                                    results = results[int(key)]
-                                else:
-                                    results = []
-                                    break
-                            if not isinstance(results, list):
-                                results = []
-
-                            parsed = [
-                                {
-                                    "title": r.get(search_title_field, ""),
-                                    "content": r.get(search_content_field, ""),
-                                    "url": r.get(search_url_field, ""),
-                                }
-                                for r in results[:search_max_results]
-                            ]
-
-                        # 组装搜索上下文
-                        search_context = (
-                            "以下是与用户问题相关的最新网络搜索结果，"
-                            "请基于这些信息回答问题。如果搜索结果不足以回答问题，请如实告知。\n\n"
-                        )
-                        for i, r in enumerate(parsed):
-                            search_context += (
-                                f"【结果 {i+1}】{r['title']}\n"
-                                f"{r['content']}\n"
-                                f"🔗 {r['url']}\n\n"
-                            )
-
-                        api_messages.append({"role": "system", "content": search_context})
-                        st.caption(f"✅ 已获取 {len(parsed)} 条搜索结果（{search_provider}）")
-
-                except Exception as e:
-                    st.warning(f"⚠️ 搜索失败（{e}），将直接回答")
-
-            # ② 添加最近 N 轮对话
             max_messages = context_rounds * 2
             recent_messages = st.session_state.messages[-max_messages:]
-            api_messages.extend(recent_messages)
 
-            # ③ 调用 LLM
             client = OpenAI(api_key=api_key, base_url=base_url)
             stream = client.chat.completions.create(
                 model=model,
-                messages=api_messages,
+                messages=recent_messages,
                 stream=True,
                 max_tokens=max_tokens,
                 temperature=temperature,
