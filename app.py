@@ -18,8 +18,8 @@ st.markdown("""
     /* 主标题 */
     h1 { color: #1a73e8; font-weight: 700; }
     /* 侧边栏 */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #f8f9fa 0%, #e8eaed 100%);
+    [data-testid="stSidebar"] > div:first-child {
+        background: linear-gradient(180deg, #e8f0fe 0%, #d2e3fc 100%);
     }
     /* 按钮 */
     .stButton > button {
