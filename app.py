@@ -17,10 +17,7 @@ st.markdown("""
     }
     /* 主标题 */
     h1 { color: #1a73e8; font-weight: 700; }
-    /* 侧边栏 */
-    [data-testid="stSidebar"] > div:first-child {
-        background: linear-gradient(180deg, #e8f0fe 0%, #d2e3fc 100%);
-    }
+    /* 侧边栏 — 使用默认背景 */
     /* 按钮 */
     .stButton > button {
         border-radius: 8px; border: none;
